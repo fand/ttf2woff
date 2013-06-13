@@ -27,11 +27,18 @@ class Header:
 
 
     # requires totalSfntSize... header can't calculate it by himself.
-    def outputWoff(self, totalSfntSize):
+    def outputWoff(self, totalSfntSize, totalWoffSize):
 
-        s = struct.pack("!4sLLHHLHHLLLLL", "wOFF", self.scaler_type,
-                        0, self.numTables, 0, totalSfntSize,
-                        1, 0, 0, 0, 0, 0, 0)
+        s = struct.pack("!4sLLHHLHHLLLLL",
+                        "wOFF",             # signature
+                        self.scaler_type,   # flavor
+                        totalWoffSize,      # length : Total size of WOFF file
+                        self.numTables,     # numTables
+                        0,                  # reserved : always 0
+                        totalSfntSize,      # totalSfntSize : total size of raw data
+                        1,                  # majorVersion
+                        0,                  # minorVersion
+                        0, 0, 0, 0, 0)      # meta / priv data
         return s        
         
             
@@ -171,7 +178,9 @@ class TTF:
 #            sum_to += t.checkSum
             totalSfntSize += (t.length + 3) & 0xFFFFFFFC
 
-        woff_header = self.header.outputWoff(totalSfntSize)
+        self.header.totalSfntSize = totalSfntSize
+        totalWoffSize = len(woff_table) + len(woff_data) + 44
+        woff_header = self.header.outputWoff(totalSfntSize, totalWoffSize)
 
         
         return (woff_header + woff_table + woff_data)
