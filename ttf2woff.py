@@ -2,84 +2,9 @@ import sys
 import struct
 import zlib
 
-
-
-# global function
-# calcSum algorithm for ttf
-def calcSum(data):
-    s = 0
-    for i in range(len(data)):
-        s += ord(data[i]) << (8 * (3 - (i % 4)))
-    return s & 0xFFFFFFFF
-
-
-
-
-class Header:
-    
-    def __init__(self, src):
-        l = struct.unpack("!LHHHH", src[:12])            
-        self.scaler_type = l[0]
-        self.numTables = l[1]
-        self.searchRange = l[2]
-        self.entrySelector = l[3]
-        self.rangeShift = l[4]
-
-
-    # requires totalSfntSize... header can't calculate it by himself.
-    def outputWoff(self, totalSfntSize, totalWoffSize):
-
-        s = struct.pack("!4sLLHHLHHLLLLL",
-                        "wOFF",             # signature
-                        self.scaler_type,   # flavor
-                        totalWoffSize,      # length : Total size of WOFF file
-                        self.numTables,     # numTables
-                        0,                  # reserved : always 0
-                        totalSfntSize,      # totalSfntSize : total size of raw data
-                        1,                  # majorVersion
-                        0,                  # minorVersion
-                        0, 0, 0, 0, 0)      # meta / priv data
-        return s        
-        
-            
-    def checkSum(self):
-        d = self.data
-        if self.tag == "head":
-            d = d[:8] + "\0\0\0\0" + d[12:]
-        return self.checkSum == calcSum(d)
-
-
-
-
-class Table:
-
-    def __init__(self, src, offset):
-        l = struct.unpack("!4sLLL", src[offset : offset + 16])
-        self.tag = l[0]
-        self.checkSum = l[1]
-        self.offset = l[2]
-        self.length = l[3]
-        self.data = src[self.offset : self.offset + self.length]
-        self.compdata = zlib.compress(self.data)
-
-        # store the original length in case of that len(data) will change.
-        self.origLength = self.length
-        
-
-    def outputWoff(self, diff):
-        self.offset += diff
-        self.update()
-        s = struct.pack("!4sLLLL", self.tag, self.offset,
-                        len(self.compdata), self.length, self.checkSum)
-        d = (len(self.compdata) - self.origLength)
-        return (s, self.compdata, d)    # (out_table, out_data, diff)
-
-        
-    def update(self):
-        self.length = len(self.data) & 0xFFFFFFFF
-        self.compdata = zlib.compress(self.data)
-        self.checkSum = calcSum(self.data)
-
+from table import Table
+from header import Header
+from tools import *
 
 
 class TTF:
@@ -99,14 +24,8 @@ class TTF:
             idx = 12 + 16 * i
             self.tables.append(Table(self.src, idx))
 
-        print "before sort############"
-        for t in self.tables:
-            print t.tag
-        print "#####################"
-            
         # sort tables with offset
-        self.tables.sort(key=lambda x: x.offset)
-
+#        self.tables.sort(key=lambda x: x.offset)
 
         # get global properties
         for t in self.tables:
@@ -130,6 +49,16 @@ class TTF:
                 self.glyf = t
 
 
+        glyf_offsets = struct.unpack("!" + str(self.numGlyphs + 1) + loca_format, self.loca.data)
+        print "len(self.loca.data): ", len(self.loca.data)
+        print "len(glyf_offsets): ", len(glyf_offsets)
+        print "numGlyphs: ", self.numGlyphs
+
+
+        
+    # check checksum for all table
+    def checkTables(self):
+        for t in self.tables:
             print t.tag, ": ",
             d = t.data
             if t.tag == "head":
@@ -139,183 +68,144 @@ class TTF:
             else:
                 print "ng"
 
+        
 
-        with open("loca_data", "wb") as f:
-            f.write(self.loca.data)
-        with open("glyf_data", "wb") as f:
-            f.write(self.glyf.data)
+    # dump table for debug
+    def dumpTable(self, name):
+        for t in self.tables:
+            if t.tag == name:
+                with open(t.tag + "_data", "wb") as f:
+                    f.write(t.data)
                 
+        
+        
+    def outputTTF(self):
 
-        glyf_offsets = struct.unpack("!" + str(self.numGlyphs + 1) + loca_format, self.loca.data)
-        print "len(self.loca.data): ", len(self.loca.data)
-        print "len(glyf_offsets): ", len(glyf_offsets)
-        print "numGlyphs: ", self.numGlyphs
+        ttf_header = ""
+        ttf_table = ""
+        ttf_data = ""        
 
+        # make sure tables are sorted by offset
+        self.tables.sort(key=lambda x: x.offset)        
+
+        # prepare totalSfntSize for sfnt_header
+        offset_new = 12 + (16 * self.header.numTables)
+
+
+        # FIRST: generate ttf_data, and calculate offset
+        offsets = {}
+        offset_data = 0
+        for t in sorted(self.tables, key=lambda x: x.offset):
+            offsets[t.tag] = offset_new
+            ttf_data += t.data
+
+            if self.src[offset_new:offset_new+t.length] == t.data and ttf_data[offset_data : offset_data + t.length] == t.data:
+                print t.tag, "same"
+            else:
+                print t.tag, "different"
+
+            # insert paddings
+            if t.length % 4 != 0:
+                ttf_data += "\0" * (4 - (t.length % 4))
+
+            # update offset, including paddings
+            offset_data += (t.length + 3) & 0xFFFFFFFC
+            offset_new += (t.length + 3) & 0xFFFFFFFC
+
+        
+        # SECOND: generate ttf_table
+        for t in self.tables:
+            t.offset = offsets[t.tag]
+            ttf_table += t.outputTTF()
+
+
+        # THIRD: generate ttf_header
+        ttf_header = self.header.outputTTF()
+
+
+
+        # check values with self.src
+        if ttf_header == self.src[:12]:
+            print "header: same"
+        else:
+            print "header: different"
+
+        if ttf_table == self.src[12:12+(16*self.header.numTables)]:
+            print "table: same"
+        else:
+            print "table: different"
+
+        if ttf_data == self.src[12+(16*self.header.numTables):]:
+            print "data: same"
+        else:
+            print "data: different"
+            
+        s = (ttf_header + ttf_table + ttf_data)        
+        if s == self.src:
+            print "all same!!!"
+        else:
+            print "all differ..."
+        
+        return s
+
+
+        
         
 
     # This converts ttf to woff.
-    # woff_header includes totalSfntSize, so generate it after woff_table/woff_data.
-    def outputWoff(self):
+    # woff_header includes totalSfntSize,
+    # and woff_table and woff_data will be generated simultaneous
+    # (coz they're stored in same object: Table)
+    # so output must follow next steps:
+    # (woff_table + woff_table) -> woff_header
+    def outputWOFF(self):
 
         woff_header = ""
         woff_table = ""
         woff_data = ""
 
-        offsetDataWoff = 44 + 20 * self.header.numTables
-        diff = 0
+        # make sure tables are sorted by offset
+        self.tables.sort(key=lambda x: x.offset)        
+
+        # offset for 1st data is fixed; it depends only on numTables.
+        offset_data = 44 + 20 * self.header.numTables
+
+        # prepare totalSfntSize for woff_header
+        totalSfntSize = 12 + 16 * self.header.numTables
         
+        # generate woff_table and woff_data
         for t in self.tables:
-            o = t.outputWoff(diff)
-            woff_table += o[0]
-            woff_data += o[1]
-            diff += o[2]
+            t.offset = offset_data
+            woff_table += t.output()
+            woff_data += t.compdata
+            offset_data += len(t.compdata)
+            if (offset_data % 4 != 0):
+                woff_data += "\0" * (4 - (offset_data % 4))
+                offset_data += (4 - (offset_data % 4))
 
 
-        totalSfntSize = 12 + (16 * self.header.numTables)
-        
-        for t in self.tables:
-            t.update()
-#            sum_to += t.checkSum
+            # get len(t.length + padding)
+            # t.length is for t.data (not t.compdata)... is this ok?
             totalSfntSize += (t.length + 3) & 0xFFFFFFFC
 
+
+        # Now, it's time to generate woff_header!
         self.header.totalSfntSize = totalSfntSize
         totalWoffSize = len(woff_table) + len(woff_data) + 44
         woff_header = self.header.outputWoff(totalSfntSize, totalWoffSize)
-
         
         return (woff_header + woff_table + woff_data)
 
-
-
-"""
-
-class Glyf:
-
-    def __init__(self, binary):
-        l = struct.unpack("!hhhhh", binary[:10])
-        self.numberOfContours = l[0]
-        self.xMin = l[1]
-        self.yMin = l[2]
-        self.xMax = l[3]
-        self.yMax = l[4]
-        self.data = binary[10:]
-
-        offset = 0
-        # for single glyph
-        if self.numberOfContours >= 0:
-            print "numOfContours: ", self.numberOfContours
-            ll = struct.unpack("!" + str(self.numberOfContours + 1) + "H",
-                               self.data[:(self.numberOfContours + 1) * 2])
-            self.endPtsOfContours = ll[:-1]
-            self.instructionLength = ll[-1]
-            offset = (self.numberOfContours + 1) * 2
-            print "len(data), offset, instlen"
-            print len(self.data), offset, self.instructionLength
-            self.instructions = \
-                struct.unpack("!" + str(self.instructionLength) + "B",
-                              self.data[offset : offset + self.instructionLength])
-
-            offset += self.instructionLength
-
-            # read flags
-            num_points = 0
-            self.flags = []
-            xsize_list = []
-            ysize_list = []
-            xsize = 2
-            ysize = 2
-            repeat = False
-            print "endPts: ", self.endPtsOfContours[-1]
-            while num_points <= self.endPtsOfContours[-1]:
-
-                f = self.data[offset]
-                print "%4x"%ord(f), 
-                
-                if repeat:
-                    repeat = False
-                    num_points += ord(f)
-                    xsize_list += [xsize] * ord(f)
-                    ysize_list += [ysize] * ord(f)                    
-                    
-                else:
-                    xsize = 1 if (ord(f) & 0x02) == 0x02 else 2
-                    ysize = 1 if (ord(f) & 0x04) == 0x04 else 2
-                    
-                    if (ord(f) & 0x08) == 0x08:
-                        repeat = True
-                    else:
-                        num_points += 1
-                        
-                    if (ord(f) & 0x02) == 0x02 or (ord(f) & 0x10) != 0x10:
-                        print "ax",
-                        xsize_list.append(xsize)
-                    if (ord(f) & 0x04) == 0x04 or (ord(f) & 0x20) != 0x20:
-                        print "ay",
-                        ysize_list.append(ysize)
-
-                self.flags.append(f)
-                offset += 1
-                print ""
-                
-            print "len(xsize_list): ", len(xsize_list)
-            print "len(ysize_list): ", len(ysize_list)
-                
-            # read coordinates
-            self.xCoordinates = []
-            for s in xsize_list:
-                self.xCoordinates.append(self.data[offset : offset + s])
-                offset += s
-                
-            self.yCoordinates = []
-            for s in ysize_list:
-                self.yCoordinates.append(self.data[offset : offset + s])
-                offset += s
-
-
-    def output(self):
-        header = struct.pack("!Hhhhh", self.xMin, self.yMin, self.xMax, self.yMax)
-        return header + self.data
-
-
-
-        
-        
-        
-
-
-    def update(self):
-        oldsum = self.checkSumAdjustment
-        
-        sum_total = 0
-        size_total = 12 + (16 * self.header.numTables)
-        
-        for t in self.tables:
-            t.update()
-            sum_total += t.origChecksum
-            size_total += (t.origLength + 3) & 0xFFFFFFFC
-            
-#        sum_total += calcSum(self.src[:44])
-            
-        self.header.totalSfntSize = size_total
-        self.checkSumAdjustment = (0xB1B0AFBA - sum_total) & 0xFFFFFFFF
-        print "oldsum: ", oldsum
-        print "newsum: ", self.checkSumAdjustment
-        
-            
-    def computeSfntSize(self):
-        s = 12
-        s += 16 * self.header.numTables
-        for t in self.tables:
-            s += (t.origLength + 3) & 0xFFFFFFFC
-        self.header.totalSfntSize = s
-"""
-
+    
         
 if __name__=='__main__':
     if len(sys.argv) != 3:
         print "args error!"
         exit()
     ttf = TTF(sys.argv[1])
+    ttf.dumpTable("head")
+    ttf.checkTables()
+    
     with open(sys.argv[2], "wb") as f:
-        f.write(ttf.outputWoff())
+        f.write(ttf.outputTTF())
 
