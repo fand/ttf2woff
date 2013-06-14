@@ -2,10 +2,13 @@ import sys
 import struct
 import zlib
 
-
+# import ttf classes
 from table import Table
 from header import Header
 from tools import *
+
+#for debug
+import binascii
 
 
 class TTF:
@@ -144,14 +147,18 @@ class TTF:
 
         # now we gotta calculate checkSumAdjustment in head table.
         if ttf_data[offset_csa:offset_csa+4] == "\0\0\0\0":
-            print "csa is cleared, it's ok!"
+            print "csa is \\0\\0\\0\\0, it's ok!"
 
         num_int32 = (12 + (16 * self.header.numTables)) / 4
         print "len(header): ", len(ttf_header), ", len(table): ", len(ttf_table)
         totalSum += sum(struct.unpack("!" + str(num_int32) + "L", ttf_header + ttf_table))
 
-        csa = (0xB1B0AFBA - totalSum) & 0xFFFFFFF
+        csa_old = binascii.b2a_hex(self.src[offset_data + offset_csa : offset_data + offset_csa + 4])
+        csa = (0xB1B0AFBA - totalSum) & 0xFFFFFFFF
         ttf_data = ttf_data[:offset_csa] + struct.pack("!L", csa) + ttf_data[(offset_csa+4):]
+
+        print "old csa: ", csa_old
+        print "new csa: ", binascii.b2a_hex(struct.pack("!L", csa))
         
         
             
