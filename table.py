@@ -36,7 +36,6 @@ class Table:
         return s
 
 
-
                     
     def checkSum(self):
         d = self.data

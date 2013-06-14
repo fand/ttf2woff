@@ -2,6 +2,7 @@ import sys
 import struct
 import zlib
 
+
 from table import Table
 from header import Header
 from tools import *
@@ -30,7 +31,9 @@ class TTF:
         # get global properties
         for t in self.tables:
             if t.tag == "head":
+                self.head = t
                 self.checkSumAdjustment = struct.unpack("!L", t.data[8:12])[0]
+                t.data = t.data[:8] + "\0\0\0\0" + t.data[12:]
                 # byte length of loca values
                 if ord(t.data[-3]) == 0:
                     loca_format = "H"
@@ -86,36 +89,52 @@ class TTF:
         ttf_data = ""        
 
         # make sure tables are sorted by offset
-        self.tables.sort(key=lambda x: x.offset)        
+#        self.tables.sort(key=lambda x: x.offset)        
 
         # prepare totalSfntSize for sfnt_header
-        offset_new = 12 + (16 * self.header.numTables)
+        offset_new = 0
 
+        # offset for ttf_data = len(ttf_header + ttf_table)
+        offset_data = 12 + (16 * self.header.numTables)
 
+        # for checkSumAdj
+        offset_csa = 0
+        totalSum = 0
+        
+        
         # FIRST: generate ttf_data, and calculate offset
         offsets = {}
-        offset_data = 0
+
         for t in sorted(self.tables, key=lambda x: x.offset):
             offsets[t.tag] = offset_new
             ttf_data += t.data
-
-            if self.src[offset_new:offset_new+t.length] == t.data and ttf_data[offset_data : offset_data + t.length] == t.data:
-                print t.tag, "same"
-            else:
-                print t.tag, "different"
 
             # insert paddings
             if t.length % 4 != 0:
                 ttf_data += "\0" * (4 - (t.length % 4))
 
+            # check the data with src
+            left = offset_data + offset_new
+            if (self.src[left : left + t.length] == t.data and 
+                ttf_data[offset_new : offset_new + t.length] == t.data):
+                print t.tag, ": same"
+            else:
+                print t.tag, ": different"
+
+            # for checkSumAdjustment.
+            totalSum += t.checkSum
+            if t.tag == "head":
+                offset_csa = offset_new + 8
+                
             # update offset, including paddings
-            offset_data += (t.length + 3) & 0xFFFFFFFC
             offset_new += (t.length + 3) & 0xFFFFFFFC
 
+
+                
         
         # SECOND: generate ttf_table
         for t in self.tables:
-            t.offset = offsets[t.tag]
+            t.offset = offsets[t.tag] + offset_data
             ttf_table += t.outputTTF()
 
 
@@ -123,6 +142,19 @@ class TTF:
         ttf_header = self.header.outputTTF()
 
 
+        # now we gotta calculate checkSumAdjustment in head table.
+        if ttf_data[offset_csa:offset_csa+4] == "\0\0\0\0":
+            print "csa is cleared, it's ok!"
+
+        num_int32 = (12 + (16 * self.header.numTables)) / 4
+        print "len(header): ", len(ttf_header), ", len(table): ", len(ttf_table)
+        totalSum += sum(struct.unpack("!" + str(num_int32) + "L", ttf_header + ttf_table))
+
+        csa = (0xB1B0AFBA - totalSum) & 0xFFFFFFF
+        ttf_data = ttf_data[:offset_csa] + struct.pack("!L", csa) + ttf_data[(offset_csa+4):]
+        
+        
+            
 
         # check values with self.src
         if ttf_header == self.src[:12]:
@@ -149,8 +181,6 @@ class TTF:
         return s
 
 
-        
-        
 
     # This converts ttf to woff.
     # woff_header includes totalSfntSize,
@@ -165,12 +195,14 @@ class TTF:
         woff_data = ""
 
         # make sure tables are sorted by offset
-        self.tables.sort(key=lambda x: x.offset)        
+#        self.tables.sort(key=lambda x: x.offset)        
 
         # offset for 1st data is fixed; it depends only on numTables.
         offset_data = 44 + 20 * self.header.numTables
 
         # prepare totalSfntSize for woff_header
+        # totalSfntSize is the size of src TTF file...
+        # so it's not same as offset_data.
         totalSfntSize = 12 + 16 * self.header.numTables
         
         # generate woff_table and woff_data
@@ -202,10 +234,14 @@ if __name__=='__main__':
     if len(sys.argv) != 3:
         print "args error!"
         exit()
+        
     ttf = TTF(sys.argv[1])
-    ttf.dumpTable("head")
-    ttf.checkTables()
+
+#    ttf.dumpTable("head")
+#    ttf.checkTables()
     
     with open(sys.argv[2], "wb") as f:
         f.write(ttf.outputTTF())
+
+
 
