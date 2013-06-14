@@ -1,6 +1,8 @@
+import os
 import sys
 import struct
 import zlib
+from collections import OrderedDict
 
 # import ttf classes
 from table import Table
@@ -23,68 +25,64 @@ class TTF:
         self.offsetData = 12 + 16 * self.header.numTables
 
         
-        self.tables = []
+        self.tables = OrderedDict()
         for i in range(self.header.numTables):
             idx = 12 + 16 * i
-            self.tables.append(Table(self.src, idx))
+            t = Table(self.src, idx)
+            self.tables[t.tag] = t
+            
+            if t.tag == "loca":
+                print binascii.b2a_hex(t.data[-3])
+                
 
         # sort tables with offset
 #        self.tables.sort(key=lambda x: x.offset)
 
         # get global properties
-        for t in self.tables:
-            if t.tag == "head":
-                self.head = t
-                self.checkSumAdjustment = struct.unpack("!L", t.data[8:12])[0]
-                t.data = t.data[:8] + "\0\0\0\0" + t.data[12:]
-                # byte length of loca values
-                if ord(t.data[-3]) == 0:
-                    loca_format = "H"
-                    loca_size = 2
-                else:
-                    loca_format = "L"
-                    loca_size = 4
-                    
-            elif t.tag == "maxp":
-                self.numGlyphs = struct.unpack("!H", t.data[4:6])[0]
+        head = self.tables["head"]
+        self.checkSumAdjustment = struct.unpack("!L", head.data[8:12])[0]
+        head.data = head.data[:8] + "\0\0\0\0" + head.data[12:]
+        
+        # byte length of loca values
+        loca = self.tables["loca"]
+        if (ord(head.data[-1]) & 0xFF) >> 4 == 0:
+            loca_format = "H"
+            loca_size = 2
+        else:
+            loca_format = "L"
+            loca_size = 4
 
-            elif t.tag == "loca":
-                self.loca = t
+        self.numGlyphs = struct.unpack("!H", self.tables["maxp"].data[4:6])[0]
 
-            elif t.tag == "glyf":
-                self.glyf = t
-
-
-        glyf_offsets = struct.unpack("!" + str(self.numGlyphs + 1) + loca_format, self.loca.data)
-        print "len(self.loca.data): ", len(self.loca.data)
-        print "len(glyf_offsets): ", len(glyf_offsets)
+        print "loca_format: ", loca_format
+        print "len(self.loca.data): ", len(loca.data)
         print "numGlyphs: ", self.numGlyphs
-
+        glyf_offsets = struct.unpack("!" + str(self.numGlyphs + 1) + loca_format, loca.data)
+        print "len(glyf_offsets): ", len(glyf_offsets)
 
         
     # check checksum for all table
     def checkTables(self):
-        for t in self.tables:
-            print t.tag, ": ",
-            d = t.data
-            if t.tag == "head":
-                d = d[:8] + "\0\0\0\0" + d[12:]
-            if t.checkSum == calcSum(d):
-                print "ok"
+        for k,t in self.tables.items():
+            tmp = t.data
+            if k == "head":
+                tmp = tmp[:8] + "\0\0\0\0" + tmp[12:]
+            if t.checkSum == calcSum(tmp):
+                print k, ": ok"
             else:
-                print "ng"
+                print k, ": ng"
 
         
 
     # dump table for debug
     def dumpTable(self, name):
-        for t in self.tables:
-            if t.tag == name:
-                with open(t.tag + "_data", "wb") as f:
-                    f.write(t.data)
+        if not(name in self.tables):
+            return
+        with open(name + "_data", "wb") as f:
+            f.write(self.tables[k].data)
                 
-        
-        
+
+            
     def outputTTF(self):
 
         ttf_header = ""
@@ -92,9 +90,9 @@ class TTF:
         ttf_data = ""        
 
         # make sure tables are sorted by offset
-#        self.tables.sort(key=lambda x: x.offset)        
+#        self.tables.sort(key=lambda x: x.offset)
 
-        # prepare totalSfntSize for sfnt_header
+        # compute offsets for data
         offset_new = 0
 
         # offset for ttf_data = len(ttf_header + ttf_table)
@@ -103,13 +101,13 @@ class TTF:
         # for checkSumAdj
         offset_csa = 0
         totalSum = 0
-        
+
         
         # FIRST: generate ttf_data, and calculate offset
         offsets = {}
 
-        for t in sorted(self.tables, key=lambda x: x.offset):
-            offsets[t.tag] = offset_new
+        for k, t in sorted(self.tables.items(), key=lambda x: x[1].offset):
+            offsets[k] = offset_new
             ttf_data += t.data
 
             # insert paddings
@@ -120,24 +118,21 @@ class TTF:
             left = offset_data + offset_new
             if (self.src[left : left + t.length] == t.data and 
                 ttf_data[offset_new : offset_new + t.length] == t.data):
-                print t.tag, ": same"
+                print k, ": same"
             else:
-                print t.tag, ": different"
+                print k, ": different"
 
             # for checkSumAdjustment.
             totalSum += t.checkSum
-            if t.tag == "head":
-                offset_csa = offset_new + 8
                 
             # update offset, including paddings
             offset_new += (t.length + 3) & 0xFFFFFFFC
 
-
-                
+            
         
         # SECOND: generate ttf_table
-        for t in self.tables:
-            t.offset = offsets[t.tag] + offset_data
+        for k,t in self.tables.items():
+            t.offset = offsets[k] + offset_data
             ttf_table += t.outputTTF()
 
 
@@ -146,21 +141,27 @@ class TTF:
 
 
         # now we gotta calculate checkSumAdjustment in head table.
+        offset_csa = offsets["head"] + 8
         if ttf_data[offset_csa:offset_csa+4] == "\0\0\0\0":
             print "csa is \\0\\0\\0\\0, it's ok!"
 
         num_int32 = (12 + (16 * self.header.numTables)) / 4
-        print "len(header): ", len(ttf_header), ", len(table): ", len(ttf_table)
         totalSum += sum(struct.unpack("!" + str(num_int32) + "L", ttf_header + ttf_table))
 
-        csa_old = binascii.b2a_hex(self.src[offset_data + offset_csa : offset_data + offset_csa + 4])
+        csa_old = self.src[offset_data + offset_csa : offset_data + offset_csa + 4]
         csa = (0xB1B0AFBA - totalSum) & 0xFFFFFFFF
-        ttf_data = ttf_data[:offset_csa] + struct.pack("!L", csa) + ttf_data[(offset_csa+4):]
-
-        print "old csa: ", csa_old
+        print "old csa: ", binascii.b2a_hex(csa_old)
         print "new csa: ", binascii.b2a_hex(struct.pack("!L", csa))
         
-        
+        ttf_data = ttf_data[:offset_csa] + struct.pack("!L", csa) + ttf_data[(offset_csa+4):]
+
+
+        head = self.tables["head"]
+        left = head.offset + offset_data
+        if self.src[left : left + head.length] == head.data:
+            print "head: same"
+        else:
+            print "head: different"
             
 
         # check values with self.src
@@ -188,53 +189,10 @@ class TTF:
         return s
 
 
+    def glitch(self):
+        pass
 
-    # This converts ttf to woff.
-    # woff_header includes totalSfntSize,
-    # and woff_table and woff_data will be generated simultaneous
-    # (coz they're stored in same object: Table)
-    # so output must follow next steps:
-    # (woff_table + woff_table) -> woff_header
-    def outputWOFF(self):
-
-        woff_header = ""
-        woff_table = ""
-        woff_data = ""
-
-        # make sure tables are sorted by offset
-#        self.tables.sort(key=lambda x: x.offset)        
-
-        # offset for 1st data is fixed; it depends only on numTables.
-        offset_data = 44 + 20 * self.header.numTables
-
-        # prepare totalSfntSize for woff_header
-        # totalSfntSize is the size of src TTF file...
-        # so it's not same as offset_data.
-        totalSfntSize = 12 + 16 * self.header.numTables
-        
-        # generate woff_table and woff_data
-        for t in self.tables:
-            t.offset = offset_data
-            woff_table += t.output()
-            woff_data += t.compdata
-            offset_data += len(t.compdata)
-            if (offset_data % 4 != 0):
-                woff_data += "\0" * (4 - (offset_data % 4))
-                offset_data += (4 - (offset_data % 4))
-
-
-            # get len(t.length + padding)
-            # t.length is for t.data (not t.compdata)... is this ok?
-            totalSfntSize += (t.length + 3) & 0xFFFFFFFC
-
-
-        # Now, it's time to generate woff_header!
-        self.header.totalSfntSize = totalSfntSize
-        totalWoffSize = len(woff_table) + len(woff_data) + 44
-        woff_header = self.header.outputWoff(totalSfntSize, totalWoffSize)
-        
-        return (woff_header + woff_table + woff_data)
-
+    
     
         
 if __name__=='__main__':
@@ -246,9 +204,20 @@ if __name__=='__main__':
 
 #    ttf.dumpTable("head")
 #    ttf.checkTables()
+#    ttf.glitch()
     
-    with open(sys.argv[2], "wb") as f:
+    with open("tmp.ttf", "wb") as f:
         f.write(ttf.outputTTF())
 
+    os.system("woff-code-latest/sfnt2woff tmp.ttf")
 
+    with open("tmp.woff", "rb") as f:
+        out = f.read()
+
+    with open(sys.argv[2], "wb") as f:
+        f.write(out)
+
+        
+
+        
 
